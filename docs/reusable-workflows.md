@@ -65,14 +65,19 @@ jobs:
       # enable_infracost: true
       # enable_ip_whitelist: false     # dormant until state accounts move to default-action Deny
       # terraform_version: "1.14.8"
-    secrets:
-      azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
-      azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
-      azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      azure_platform_subscription_id: ${{ secrets.AZURE_PLATFORM_SUBSCRIPTION_ID }}
-      infracost_api_key: ${{ secrets.INFRACOST_API_KEY }}
-      # tf_vars_json: ${{ secrets.TF_VARS_JSON }}   # see below
+    secrets: inherit
 ```
+
+`secrets: inherit` is required, not a convenience: the Azure identifiers
+(`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`AZURE_PLATFORM_SUBSCRIPTION_ID`) are per-repo **environment** secrets
+(provisioned by `infra-landingzone-platform/scripts/bootstrap-deployment-identities.sh`).
+An explicit `secrets:` mapping is evaluated in the caller outside any
+environment scope, so environment secrets resolve to empty strings and
+`azure/login` fails with "Not all values are present". With inherit, the
+environment-scoped plan job resolves them per matrix leg. zizmor flags
+`secrets-inherit` on the caller — ignore it for the calling workflow in the
+repo's `.github/validation/zizmor.yml`.
 
 ### Plan-time secret TF_VARs (`tf_vars_json`)
 
@@ -84,8 +89,5 @@ single JSON object secret. It is exported as `TF_VAR_<key>` before `terraform pl
 ```
 
 Scalar string values only — values containing newlines are not supported through
-this channel. Store the JSON as the `TF_VARS_JSON` environment secret.
-
-> Open question for the human (plan §5.1): this `tf_vars_json` convention vs.
-> `secrets: inherit` + a per-repo shim job. The workflow supports the former; if
-> shims prove simpler, we can switch.
+this channel. Store the JSON as the `TF_VARS_JSON` environment secret; it flows
+to the workflow automatically via `secrets: inherit`.

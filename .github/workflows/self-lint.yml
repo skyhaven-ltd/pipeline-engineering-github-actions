@@ -33,7 +33,10 @@ jobs:
           echo "$PWD" >> "$GITHUB_PATH"
 
       - name: Run actionlint
-        run: actionlint -color
+        # github.job_workflow_sha is a documented context property (the SHA of
+        # the called reusable workflow file) that actionlint's github context
+        # type model does not know about yet — suppress that false positive.
+        run: actionlint -color -ignore 'property "job_workflow_sha" is not defined'
 
   zizmor:
     name: zizmor
