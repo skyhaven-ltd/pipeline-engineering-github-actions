@@ -1,7 +1,4 @@
-name: CI
-
-# Lints this repo's own shared automation: actionlint (with shellcheck) over the
-# workflows, and zizmor over both the workflows and the composite actions.
+name: Workflow Lint
 
 on:
   pull_request:
@@ -36,8 +33,6 @@ jobs:
           echo "$PWD" >> "$GITHUB_PATH"
 
       - name: Run actionlint
-        # actionlint shells out to shellcheck (preinstalled on ubuntu-latest) to
-        # lint the run: scripts inside the workflows.
         run: actionlint -color
 
   zizmor:

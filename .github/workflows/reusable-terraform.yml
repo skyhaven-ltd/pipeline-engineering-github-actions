@@ -1,9 +1,4 @@
-name: Terraform PR Validation (Reusable)
-
-# Promoted from infra-engineering-template/.github/workflows/pr-validation.yml.
-# Three jobs: Terraform hygiene, workflow security (zizmor), and a plan-aware
-# scan matrix (real plan -> plan JSON -> Checkov deep analysis + Infracost).
-# Plan binaries and JSON stay ephemeral on the runner - never uploaded.
+name: Terraform PR Validation
 
 on:
   workflow_call:
@@ -213,8 +208,6 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
 
-      # Single Azure login for all state-plane CLI operations (container, lease,
-      # firewall). Terraform authenticates separately via ARM_* OIDC env above.
       - name: Azure Login
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:

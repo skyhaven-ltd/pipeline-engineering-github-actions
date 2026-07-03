@@ -35,13 +35,14 @@ runs:
   using: composite
   steps:
     - name: "Install Checkov"
+      id: install
       shell: bash
       env:
         CHECKOV_VERSION: ${{ inputs.checkov_version }}
       run: |
         set -euo pipefail
         python -m pip install --user "checkov==${CHECKOV_VERSION}"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        echo "bin=$HOME/.local/bin/checkov" >> "$GITHUB_OUTPUT"
 
     - name: "Terraform Show Plan JSON"
       id: show
@@ -63,6 +64,7 @@ runs:
         PLAN_JSON: ${{ steps.show.outputs.plan_json }}
         SOFT_FAIL: ${{ inputs.soft_fail }}
         OUTPUT_FORMATS: ${{ inputs.output_formats }}
+        CHECKOV_BIN: ${{ steps.install.outputs.bin }}
       run: |
         set -euo pipefail
         ARGS=(
@@ -77,4 +79,4 @@ runs:
         if [[ "${SOFT_FAIL}" == "true" ]]; then
           ARGS+=(--soft-fail)
         fi
-        checkov "${ARGS[@]}"
+        "${CHECKOV_BIN}" "${ARGS[@]}"
