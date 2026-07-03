@@ -1,0 +1,67 @@
+name: "Ensure Terraform State Container"
+description: "Creates the Azure Storage container for Terraform state if it does not already exist."
+
+inputs:
+  storage_account_name:
+    description: "Name of the Azure Storage account."
+    required: true
+  container_name:
+    description: "Name of the blob container to ensure exists. Defaults to the calling repository name."
+    required: false
+    default: ${{ github.event.repository.name }}
+  login:
+    description: "Run azure/login before ensuring the container. Set to false when the job is already authenticated to Azure."
+    required: false
+    default: "true"
+  azure_client_id:
+    description: "Azure client ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_tenant_id:
+    description: "Azure tenant ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_subscription_id:
+    description: "Azure subscription ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: "Azure Login"
+      if: ${{ inputs.login == 'true' }}
+      uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+      with:
+        client-id: ${{ inputs.azure_client_id }}
+        tenant-id: ${{ inputs.azure_tenant_id }}
+        subscription-id: ${{ inputs.azure_subscription_id }}
+
+    - name: "Ensure Container Exists"
+      shell: bash
+      env:
+        CONTAINER_NAME: ${{ inputs.container_name }}
+        STORAGE_ACCOUNT_NAME: ${{ inputs.storage_account_name }}
+      run: |
+        set -euo pipefail
+
+        # Explicit exists-check so real errors (auth, missing account) fail loudly
+        # instead of being swallowed. `set -e` propagates any az failure here.
+        EXISTS=$(az storage container exists \
+          --name "$CONTAINER_NAME" \
+          --account-name "$STORAGE_ACCOUNT_NAME" \
+          --auth-mode login \
+          --query "exists" \
+          --output tsv)
+
+        if [[ "$EXISTS" == "true" ]]; then
+          echo "Container '$CONTAINER_NAME' already exists."
+        else
+          echo "Container '$CONTAINER_NAME' not found - creating..."
+          az storage container create \
+            --name "$CONTAINER_NAME" \
+            --account-name "$STORAGE_ACCOUNT_NAME" \
+            --auth-mode login \
+            --output none
+          echo "Container '$CONTAINER_NAME' created."
+        fi

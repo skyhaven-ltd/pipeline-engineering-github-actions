@@ -1,0 +1,3 @@
+# The user's global gitignore excludes docs/ by default; this shared repo tracks
+# its per-action usage docs, so re-include the directory here.
+!docs/

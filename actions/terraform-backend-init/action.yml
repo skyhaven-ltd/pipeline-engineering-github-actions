@@ -1,0 +1,74 @@
+name: "Terraform Backend Init"
+description: "Runs terraform init against the Sky Haven Azure remote state backend, deriving backend names from the org convention."
+
+inputs:
+  environment:
+    description: "Deployment environment (e.g. dev, prd). Used to derive the backend resource names."
+    required: true
+  working_directory:
+    description: "Directory containing the Terraform root module."
+    required: false
+    default: infra
+  state_key:
+    description: "Blob key for the state file."
+    required: false
+    default: terraform.tfstate
+  platform_subscription_id:
+    description: "Subscription ID hosting the state storage account."
+    required: true
+  resource_group_name:
+    description: "Override the derived state resource group name (default rg-tfs-platform-<env>-uks-01)."
+    required: false
+    default: ""
+  storage_account_name:
+    description: "Override the derived state storage account name (default sttfsplatform<env>uks01)."
+    required: false
+    default: ""
+  container_name:
+    description: "Override the state container name (defaults to the repository name)."
+    required: false
+    default: ${{ github.event.repository.name }}
+
+outputs:
+  resource_group_name:
+    description: "The resolved backend resource group name."
+    value: ${{ steps.derive.outputs.resource_group_name }}
+  storage_account_name:
+    description: "The resolved backend storage account name."
+    value: ${{ steps.derive.outputs.storage_account_name }}
+
+runs:
+  using: composite
+  steps:
+    - name: "Derive backend names"
+      id: derive
+      shell: bash
+      env:
+        TF_ENV: ${{ inputs.environment }}
+        RG_OVERRIDE: ${{ inputs.resource_group_name }}
+        SA_OVERRIDE: ${{ inputs.storage_account_name }}
+      run: |
+        set -euo pipefail
+        RG="${RG_OVERRIDE:-rg-tfs-platform-${TF_ENV}-uks-01}"
+        SA="${SA_OVERRIDE:-sttfsplatform${TF_ENV}uks01}"
+        echo "resource_group_name=${RG}" >> "$GITHUB_OUTPUT"
+        echo "storage_account_name=${SA}" >> "$GITHUB_OUTPUT"
+        echo "Backend: rg=${RG} sa=${SA}"
+
+    - name: "Terraform Init"
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        RESOURCE_GROUP_NAME: ${{ steps.derive.outputs.resource_group_name }}
+        STORAGE_ACCOUNT_NAME: ${{ steps.derive.outputs.storage_account_name }}
+        CONTAINER_NAME: ${{ inputs.container_name }}
+        STATE_KEY: ${{ inputs.state_key }}
+        PLATFORM_SUBSCRIPTION_ID: ${{ inputs.platform_subscription_id }}
+      run: |
+        set -euo pipefail
+        terraform -chdir="${WORKING_DIRECTORY}" init -input=false \
+          -backend-config="resource_group_name=${RESOURCE_GROUP_NAME}" \
+          -backend-config="storage_account_name=${STORAGE_ACCOUNT_NAME}" \
+          -backend-config="container_name=${CONTAINER_NAME}" \
+          -backend-config="key=${STATE_KEY}" \
+          -backend-config="subscription_id=${PLATFORM_SUBSCRIPTION_ID}"

@@ -1,0 +1,170 @@
+name: "Storage Account Network Toggle"
+description: "Adds or removes a runner egress IP on an Azure Storage account firewall so a job can reach the Terraform state account."
+
+inputs:
+  mode:
+    description: "add or remove."
+    required: true
+  storage_account_name:
+    description: "Name of the Azure Storage account."
+    required: true
+  resource_group_name:
+    description: "Resource group of the storage account."
+    required: true
+  ip_address:
+    description: "IP or CIDR to allow. Empty => auto-detect the runner egress IP."
+    required: false
+    default: ""
+  manage_public_access:
+    description: "When true, flip publicNetworkAccess between Disabled and Enabled around the rule change."
+    required: false
+    default: "false"
+  public_access_was_disabled:
+    description: "For mode=remove: pass the add step's output so it can restore publicNetworkAccess=Disabled."
+    required: false
+    default: "false"
+  container_name:
+    description: "Container used to poll rule effectiveness (mode=add). Defaults to the repository name."
+    required: false
+    default: ${{ github.event.repository.name }}
+  wait_seconds:
+    description: "Propagation poll budget in seconds (mode=add)."
+    required: false
+    default: "90"
+  login:
+    description: "Run azure/login first. Set to false when the job is already authenticated to Azure."
+    required: false
+    default: "true"
+  azure_client_id:
+    description: "Azure client ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_tenant_id:
+    description: "Azure tenant ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_subscription_id:
+    description: "Azure subscription ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+
+outputs:
+  ip_address:
+    description: "The IP address that was added or removed (auto-detected if not supplied)."
+    value: ${{ steps.resolve.outputs.ip_address }}
+  public_access_was_disabled:
+    description: "true if mode=add flipped publicNetworkAccess from Disabled to Enabled (pass to the remove step)."
+    value: ${{ steps.toggle.outputs.public_access_was_disabled }}
+
+runs:
+  using: composite
+  steps:
+    - name: "Azure Login"
+      if: ${{ inputs.login == 'true' }}
+      uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+      with:
+        client-id: ${{ inputs.azure_client_id }}
+        tenant-id: ${{ inputs.azure_tenant_id }}
+        subscription-id: ${{ inputs.azure_subscription_id }}
+
+    - name: "Resolve IP address"
+      id: resolve
+      shell: bash
+      env:
+        IP_INPUT: ${{ inputs.ip_address }}
+      run: |
+        set -euo pipefail
+        IP="${IP_INPUT}"
+        if [[ -z "${IP}" ]]; then
+          IP=$(curl -fsS https://api.ipify.org || curl -fsS https://ifconfig.me)
+        fi
+        if [[ -z "${IP}" ]]; then
+          echo "::error::Could not determine an IP address to toggle." >&2
+          exit 1
+        fi
+        echo "ip_address=${IP}" >> "$GITHUB_OUTPUT"
+        echo "Resolved IP: ${IP}"
+
+    - name: "Toggle network rule"
+      id: toggle
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        STORAGE_ACCOUNT_NAME: ${{ inputs.storage_account_name }}
+        RESOURCE_GROUP_NAME: ${{ inputs.resource_group_name }}
+        IP_ADDRESS: ${{ steps.resolve.outputs.ip_address }}
+        MANAGE_PUBLIC_ACCESS: ${{ inputs.manage_public_access }}
+        PUBLIC_ACCESS_WAS_DISABLED: ${{ inputs.public_access_was_disabled }}
+        CONTAINER_NAME: ${{ inputs.container_name }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      run: |
+        set -euo pipefail
+        echo "public_access_was_disabled=false" >> "$GITHUB_OUTPUT"
+
+        case "${MODE}" in
+          add)
+            if [[ "${MANAGE_PUBLIC_ACCESS}" == "true" ]]; then
+              CURRENT=$(az storage account show \
+                --name "${STORAGE_ACCOUNT_NAME}" \
+                --resource-group "${RESOURCE_GROUP_NAME}" \
+                --query "publicNetworkAccess" --output tsv)
+              if [[ "${CURRENT}" == "Disabled" ]]; then
+                echo "publicNetworkAccess is Disabled; enabling with default-action Deny."
+                az storage account update \
+                  --name "${STORAGE_ACCOUNT_NAME}" \
+                  --resource-group "${RESOURCE_GROUP_NAME}" \
+                  --public-network-access Enabled \
+                  --default-action Deny \
+                  --output none
+                # Overwrite the earlier default output.
+                sed -i '/^public_access_was_disabled=/d' "$GITHUB_OUTPUT"
+                echo "public_access_was_disabled=true" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+
+            echo "Adding network rule for ${IP_ADDRESS}."
+            az storage account network-rule add \
+              --account-name "${STORAGE_ACCOUNT_NAME}" \
+              --resource-group "${RESOURCE_GROUP_NAME}" \
+              --ip-address "${IP_ADDRESS}" \
+              --output none
+
+            echo "Waiting for the rule to take effect (up to ${WAIT_SECONDS}s)..."
+            DEADLINE=$((SECONDS + WAIT_SECONDS))
+            until az storage container exists \
+                --name "${CONTAINER_NAME}" \
+                --account-name "${STORAGE_ACCOUNT_NAME}" \
+                --auth-mode login \
+                --output none 2>/dev/null; do
+              if (( SECONDS >= DEADLINE )); then
+                echo "::warning::Network rule not confirmed effective within ${WAIT_SECONDS}s; continuing anyway."
+                break
+              fi
+              sleep 5
+            done
+            echo "Network rule active for ${IP_ADDRESS}."
+            ;;
+
+          remove)
+            echo "Removing network rule for ${IP_ADDRESS} (tolerating not-found)."
+            az storage account network-rule remove \
+              --account-name "${STORAGE_ACCOUNT_NAME}" \
+              --resource-group "${RESOURCE_GROUP_NAME}" \
+              --ip-address "${IP_ADDRESS}" \
+              --output none || echo "Rule not present; nothing to remove."
+
+            if [[ "${PUBLIC_ACCESS_WAS_DISABLED}" == "true" ]]; then
+              echo "Restoring publicNetworkAccess=Disabled."
+              az storage account update \
+                --name "${STORAGE_ACCOUNT_NAME}" \
+                --resource-group "${RESOURCE_GROUP_NAME}" \
+                --public-network-access Disabled \
+                --output none
+            fi
+            ;;
+
+          *)
+            echo "::error::Unknown mode '${MODE}'. Use 'add' or 'remove'." >&2
+            exit 1
+            ;;
+        esac

@@ -1,0 +1,92 @@
+name: "Infracost PR Comment"
+description: "Generates an Infracost diff from a Terraform plan JSON and posts a sticky pull request comment."
+
+inputs:
+  plan_json_path:
+    description: "Path to the Terraform plan JSON file."
+    required: true
+  api_key:
+    description: "Infracost API key (hosted Cloud Pricing API)."
+    required: true
+  github_token:
+    description: "Token used to post the PR comment (needs pull-requests: write)."
+    required: true
+  pull_request_number:
+    description: "The pull request number to comment on."
+    required: true
+  behavior:
+    description: "Infracost comment behavior: update, new, delete-and-new, or hide-and-new."
+    required: false
+    default: update
+  comment_tag:
+    description: "Sticky comment tag. Use a per-environment value (e.g. infracost-dev) to keep one comment per environment."
+    required: false
+    default: infracost
+  usage_file:
+    description: "Optional path to an Infracost usage file."
+    required: false
+    default: ""
+  infracost_version:
+    description: "Infracost CLI version to install."
+    required: false
+    default: "0.10.44"
+
+runs:
+  using: composite
+  steps:
+    - name: "Require Infracost API Key"
+      shell: bash
+      env:
+        INFRACOST_API_KEY: ${{ inputs.api_key }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${INFRACOST_API_KEY:-}" ]]; then
+          echo "::error::Infracost API key is required when Infracost is enabled." >&2
+          exit 1
+        fi
+
+    - name: "Install Infracost"
+      shell: bash
+      env:
+        INFRACOST_VERSION: ${{ inputs.infracost_version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL \
+          --output /tmp/infracost.tar.gz \
+          "https://github.com/infracost/infracost/releases/download/v${INFRACOST_VERSION}/infracost-linux-amd64.tar.gz"
+        tar -xzf /tmp/infracost.tar.gz -C /tmp
+        sudo install -m 0755 /tmp/infracost-linux-amd64 /usr/local/bin/infracost
+        infracost --version
+
+    - name: "Generate Infracost Diff"
+      shell: bash
+      env:
+        INFRACOST_API_KEY: ${{ inputs.api_key }}
+        PLAN_JSON_PATH: ${{ inputs.plan_json_path }}
+        USAGE_FILE: ${{ inputs.usage_file }}
+        COMMENT_TAG: ${{ inputs.comment_tag }}
+      run: |
+        set -euo pipefail
+        ARGS=(diff --path "${PLAN_JSON_PATH}" --format json --out-file "/tmp/infracost-${COMMENT_TAG}.json")
+        if [[ -n "${USAGE_FILE}" ]]; then
+          ARGS+=(--usage-file "${USAGE_FILE}")
+        fi
+        infracost "${ARGS[@]}"
+
+    - name: "Post Infracost Comment"
+      shell: bash
+      env:
+        INFRACOST_API_KEY: ${{ inputs.api_key }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pull_request_number }}
+        BEHAVIOR: ${{ inputs.behavior }}
+        COMMENT_TAG: ${{ inputs.comment_tag }}
+      run: |
+        set -euo pipefail
+        infracost comment github \
+          --path "/tmp/infracost-${COMMENT_TAG}.json" \
+          --repo "$GITHUB_REPOSITORY" \
+          --pull-request "$PR_NUMBER" \
+          --github-token "$GITHUB_TOKEN" \
+          --behavior "${BEHAVIOR}" \
+          --tag "${COMMENT_TAG}"

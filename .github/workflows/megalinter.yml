@@ -1,0 +1,77 @@
+name: MegaLinter (Reusable)
+
+# Dynamic multi-language linting, replacing Super-Linter. Runs the flavour-scoped
+# MegaLinter container so the image pull is language-sized, not multi-GB.
+# Per-repo configuration (disable list, linter config paths) lives in the
+# consumer's .mega-linter.yml.
+
+on:
+  workflow_call:
+    inputs:
+      flavor:
+        description: "MegaLinter flavour (e.g. cupcake, terraform, javascript). Selects the container image."
+        type: string
+        required: false
+        default: cupcake
+      config_file:
+        description: "MegaLinter config file in the consumer repo."
+        type: string
+        required: false
+        default: .mega-linter.yml
+      validate_all_codebase:
+        description: "Lint the whole tree instead of just the PR diff."
+        type: boolean
+        required: false
+        default: false
+      megalinter_version:
+        description: "MegaLinter version tag (image tag)."
+        type: string
+        required: false
+        default: "v8"
+
+permissions:
+  contents: read
+
+jobs:
+  megalinter:
+    name: MegaLinter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history so diff-only linting can compare against the base branch.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run MegaLinter
+        env:
+          FLAVOR: ${{ inputs.flavor }}
+          MEGALINTER_VERSION: ${{ inputs.megalinter_version }}
+          VALIDATE_ALL_CODEBASE: ${{ inputs.validate_all_codebase }}
+          MEGALINTER_CONFIG: ${{ inputs.config_file }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Read-only CI: no autofix, no PR/status reporters (PR noise stays limited
+          # to Infracost from the terraform validation workflow). The runner's
+          # GITHUB_* env is forwarded so MegaLinter can compute the PR diff.
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/tmp/lint" \
+            -e DEFAULT_WORKSPACE=/tmp/lint \
+            -e VALIDATE_ALL_CODEBASE \
+            -e MEGALINTER_CONFIG \
+            -e APPLY_FIXES=none \
+            -e GITHUB_COMMENT_REPORTER=false \
+            -e GITHUB_STATUS_REPORTER=false \
+            -e GITHUB_TOKEN \
+            -e GITHUB_REPOSITORY \
+            -e GITHUB_REF \
+            -e GITHUB_SHA \
+            -e GITHUB_HEAD_REF \
+            -e GITHUB_BASE_REF \
+            -e GITHUB_EVENT_NAME \
+            -e GITHUB_RUN_ID \
+            "oxsecurity/megalinter-${FLAVOR}:${MEGALINTER_VERSION}"

@@ -1,0 +1,46 @@
+name: Release Tag
+
+# This repo tags itself using its own reusable tag workflow, then maintains the
+# floating major tag (e.g. v1) so humans have a moving pointer while SHA pins
+# stay canonical for consumers.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+permissions: {}
+
+jobs:
+  tag:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/tag.yml
+
+  floating-major:
+    name: Update Floating Major Tag
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Move major tag
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MAJOR="${TAG%%.*}"   # e.g. v1.2.3 -> v1
+          echo "Pointing ${MAJOR} at ${TAG} (${GITHUB_SHA})."
+          git tag -f "${MAJOR}" "${GITHUB_SHA}"
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force "$REMOTE" "refs/tags/${MAJOR}"

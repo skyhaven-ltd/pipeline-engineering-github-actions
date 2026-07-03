@@ -1,0 +1,113 @@
+name: Tag (Reusable)
+
+# Idempotent semver tagging on merge to main. Branch prefix drives the bump:
+#   major/** -> major, minor/** -> minor, patch/** -> patch, anything else -> no tag.
+# The consumer keeps the trigger (pull_request: closed on main); this workflow
+# carries the logic.
+
+on:
+  workflow_call:
+    inputs:
+      tag_prefix:
+        description: "Prefix for version tags."
+        type: string
+        required: false
+        default: "v"
+    outputs:
+      tag:
+        description: "The tag created this run, empty if none."
+        value: ${{ jobs.tag.outputs.tag }}
+
+permissions: {}
+
+# Serialise tagging per repo so two quickly-merged PRs cannot race to push the
+# same next tag. Do not cancel in progress - each run must complete.
+concurrency:
+  group: tag-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Create Version Tag
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.push.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine bump type
+        id: bump
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in
+            major/*) echo "type=major" >> "$GITHUB_OUTPUT" ;;
+            minor/*) echo "type=minor" >> "$GITHUB_OUTPUT" ;;
+            patch/*) echo "type=patch" >> "$GITHUB_OUTPUT" ;;
+            *)       echo "type=none"  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Compute and push tag
+        id: push
+        if: steps.bump.outputs.type != 'none'
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          latest=$(git tag --list "${TAG_PREFIX}*" --sort=-version:refname | head -n 1)
+          latest=${latest:-${TAG_PREFIX}0.0.0}
+          stripped=${latest#"$TAG_PREFIX"}
+          major=$(echo "$stripped" | cut -d. -f1)
+          minor=$(echo "$stripped" | cut -d. -f2)
+          patch=$(echo "$stripped" | cut -d. -f3)
+
+          case "$BUMP_TYPE" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          TAG="${TAG_PREFIX}${major}.${minor}.${patch}"
+
+          # Idempotency: if the computed tag already exists at this commit, we are
+          # a safe re-run - succeed. If it exists elsewhere, fail loudly.
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            existing=$(git rev-list -n 1 "refs/tags/${TAG}")
+            if [[ "$existing" == "$GITHUB_SHA" ]]; then
+              echo "Tag ${TAG} already exists at HEAD. Nothing to do."
+              echo "tag=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Tag ${TAG} already exists at ${existing}, not ${GITHUB_SHA}." >&2
+            exit 1
+          fi
+
+          git tag "$TAG"
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git push "$REMOTE" "refs/tags/${TAG}"; then
+            echo "Pushed tag ${TAG}."
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # Lost a race: another run may have pushed the same tag at this commit.
+            git fetch --tags --force
+            existing=$(git rev-list -n 1 "refs/tags/${TAG}" 2>/dev/null || echo "")
+            if [[ "$existing" == "$GITHUB_SHA" ]]; then
+              echo "Tag ${TAG} already present at HEAD after race. Treating as success."
+              echo "tag=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Failed to push tag ${TAG}." >&2
+            exit 1
+          fi

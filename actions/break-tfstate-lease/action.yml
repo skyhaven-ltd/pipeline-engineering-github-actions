@@ -1,0 +1,72 @@
+name: "Break Terraform State Lease"
+description: "Breaks an Azure Storage blob lease on the Terraform state file left by a failed run."
+
+inputs:
+  storage_account_name:
+    description: "Name of the Azure Storage account holding the state container."
+    required: true
+  container_name:
+    description: "Name of the blob container holding the state file. Defaults to the calling repository name."
+    required: false
+    default: ${{ github.event.repository.name }}
+  state_key:
+    description: "Blob name of the state file."
+    required: false
+    default: terraform.tfstate
+  login:
+    description: "Run azure/login before breaking the lease. Set to false when the job is already authenticated to Azure."
+    required: false
+    default: "true"
+  azure_client_id:
+    description: "Azure client ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_tenant_id:
+    description: "Azure tenant ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_subscription_id:
+    description: "Azure subscription ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: "Azure Login"
+      if: ${{ inputs.login == 'true' }}
+      uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+      with:
+        client-id: ${{ inputs.azure_client_id }}
+        tenant-id: ${{ inputs.azure_tenant_id }}
+        subscription-id: ${{ inputs.azure_subscription_id }}
+
+    - name: "Break State Lease"
+      shell: bash
+      env:
+        STORAGE_ACCOUNT_NAME: ${{ inputs.storage_account_name }}
+        CONTAINER_NAME: ${{ inputs.container_name }}
+        STATE_KEY: ${{ inputs.state_key }}
+      run: |
+        set -euo pipefail
+
+        LEASE_STATE=$(az storage blob show \
+          --account-name "$STORAGE_ACCOUNT_NAME" \
+          --container-name "$CONTAINER_NAME" \
+          --name "$STATE_KEY" \
+          --auth-mode login \
+          --query "properties.lease.state" \
+          --output tsv 2>/dev/null || echo "missing")
+
+        if [[ "$LEASE_STATE" == "leased" ]]; then
+          echo "::warning::Active lease found on ${CONTAINER_NAME}/${STATE_KEY} - breaking it. A leftover lease usually means a previous Terraform run crashed."
+          az storage blob lease break \
+            --account-name "$STORAGE_ACCOUNT_NAME" \
+            --container-name "$CONTAINER_NAME" \
+            --blob-name "$STATE_KEY" \
+            --auth-mode login \
+            --output none
+          echo "Lease broken."
+        else
+          echo "No active lease (state: ${LEASE_STATE}). Nothing to do."
+        fi

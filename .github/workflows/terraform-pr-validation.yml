@@ -1,0 +1,309 @@
+name: Terraform PR Validation (Reusable)
+
+# Promoted from infra-engineering-template/.github/workflows/pr-validation.yml.
+# Three jobs: Terraform hygiene, workflow security (zizmor), and a plan-aware
+# scan matrix (real plan -> plan JSON -> Checkov deep analysis + Infracost).
+# Plan binaries and JSON stay ephemeral on the runner - never uploaded.
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Directory containing the Terraform root module."
+        type: string
+        required: false
+        default: infra
+      environments:
+        description: "JSON array of environments to plan, e.g. '[\"dev\",\"prd\"]'."
+        type: string
+        required: false
+        default: '["dev","prd"]'
+      state_key:
+        description: "Blob key for the state file."
+        type: string
+        required: false
+        default: terraform.tfstate
+      globals_var_file:
+        description: "Shared tfvars file passed to every plan (relative to working_directory root)."
+        type: string
+        required: false
+        default: vars/globals.tfvars
+      terraform_version:
+        type: string
+        required: false
+        default: "1.14.8"
+      tflint_version:
+        type: string
+        required: false
+        default: "0.63.1"
+      checkov_version:
+        type: string
+        required: false
+        default: "3.3.2"
+      zizmor_version:
+        type: string
+        required: false
+        default: "1.26.1"
+      infracost_version:
+        type: string
+        required: false
+        default: "0.10.44"
+      checkov_config:
+        type: string
+        required: false
+        default: .github/validation/checkov.yaml
+      tflint_config:
+        type: string
+        required: false
+        default: .github/validation/tflint.hcl
+      zizmor_config:
+        type: string
+        required: false
+        default: .github/validation/zizmor.yml
+      enable_infracost:
+        description: "Post Infracost cost-diff PR comments (requires infracost_api_key)."
+        type: boolean
+        required: false
+        default: true
+      enable_ip_whitelist:
+        description: "Whitelist the runner egress IP on the state storage account firewall for the plan job."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      azure_client_id:
+        required: true
+      azure_tenant_id:
+        required: true
+      azure_subscription_id:
+        required: true
+      azure_platform_subscription_id:
+        required: true
+      infracost_api_key:
+        required: false
+      tf_vars_json:
+        description: "Optional JSON object of plan-time TF_VAR_* values, exported as environment before plan."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-hygiene:
+    name: Terraform Hygiene
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Install TFLint
+        env:
+          TFLINT_VERSION: ${{ inputs.tflint_version }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            --output /tmp/tflint.zip \
+            "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}/tflint_linux_amd64.zip"
+          unzip -q /tmp/tflint.zip -d /tmp/tflint
+          sudo install -m 0755 /tmp/tflint/tflint /usr/local/bin/tflint
+          tflint --version
+
+      - name: Terraform Format Check
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: terraform -chdir="${WORKING_DIRECTORY}" fmt -check -recursive
+
+      - name: Terraform Init Without Backend
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: terraform -chdir="${WORKING_DIRECTORY}" init -backend=false -input=false
+
+      - name: Terraform Validate
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: terraform -chdir="${WORKING_DIRECTORY}" validate
+
+      - name: TFLint Init
+        env:
+          TFLINT_CONFIG: ${{ inputs.tflint_config }}
+        run: tflint --init --config "$GITHUB_WORKSPACE/${TFLINT_CONFIG}"
+
+      - name: TFLint
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+          TFLINT_CONFIG: ${{ inputs.tflint_config }}
+        run: tflint --chdir="${WORKING_DIRECTORY}" --config "$GITHUB_WORKSPACE/${TFLINT_CONFIG}"
+
+  workflow-security:
+    name: Workflow Security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        env:
+          ZIZMOR_VERSION: ${{ inputs.zizmor_version }}
+        run: |
+          set -euo pipefail
+          python -m pip install --user "zizmor==${ZIZMOR_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run zizmor
+        env:
+          ZIZMOR_CONFIG: ${{ inputs.zizmor_config }}
+        run: |
+          set -euo pipefail
+          TARGETS=()
+          [[ -d .github/workflows ]] && TARGETS+=(.github/workflows)
+          [[ -d .github/actions ]] && TARGETS+=(.github/actions)
+          if [[ ${#TARGETS[@]} -eq 0 ]]; then
+            echo "No workflow/action directories to scan."
+            exit 0
+          fi
+          if [[ -f "${ZIZMOR_CONFIG}" ]]; then
+            zizmor --config "${ZIZMOR_CONFIG}" "${TARGETS[@]}"
+          else
+            zizmor "${TARGETS[@]}"
+          fi
+
+  terraform-plan:
+    name: Terraform Plan, Checkov & Infracost (${{ matrix.environment }})
+    needs:
+      - terraform-hygiene
+      - workflow-security
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(inputs.environments) }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.azure_client_id }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.azure_subscription_id }}
+      ARM_TENANT_ID: ${{ secrets.azure_tenant_id }}
+      ARM_USE_OIDC: "true"
+      TF_ENV: ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      # Single Azure login for all state-plane CLI operations (container, lease,
+      # firewall). Terraform authenticates separately via ARM_* OIDC env above.
+      - name: Azure Login
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.azure_client_id }}
+          tenant-id: ${{ secrets.azure_tenant_id }}
+          subscription-id: ${{ secrets.azure_platform_subscription_id }}
+
+      - name: Whitelist Runner IP
+        id: ip_add
+        if: ${{ inputs.enable_ip_whitelist }}
+        uses: ./actions/storage-network-toggle
+        with:
+          mode: add
+          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
+          resource_group_name: rg-tfs-platform-${{ matrix.environment }}-uks-01
+          login: "false"
+
+      - name: Ensure State Container
+        uses: ./actions/ensure-tfstate-container
+        with:
+          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
+          container_name: ${{ github.event.repository.name }}
+          login: "false"
+
+      - name: Export TF_VAR secrets
+        env:
+          TF_VARS_JSON: ${{ secrets.tf_vars_json }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${TF_VARS_JSON:-}" ]]; then
+            echo "${TF_VARS_JSON}" | jq -r 'to_entries[] | "TF_VAR_\(.key)=\(.value)"' >> "$GITHUB_ENV"
+          fi
+
+      - name: Terraform Init
+        uses: ./actions/terraform-backend-init
+        with:
+          environment: ${{ matrix.environment }}
+          working_directory: ${{ inputs.working_directory }}
+          state_key: ${{ inputs.state_key }}
+          platform_subscription_id: ${{ secrets.azure_platform_subscription_id }}
+          container_name: ${{ github.event.repository.name }}
+
+      - name: Terraform Plan
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+          GLOBALS_VAR_FILE: ${{ inputs.globals_var_file }}
+        run: |
+          set -euo pipefail
+          terraform -chdir="${WORKING_DIRECTORY}" plan -input=false \
+            -var-file="${GLOBALS_VAR_FILE}" \
+            -var-file="vars/${TF_ENV}.tfvars" \
+            -out="tfplan-${TF_ENV}.binary"
+
+      - name: Checkov Plan-Aware Scan
+        id: checkov
+        uses: ./actions/checkov-plan-scan
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          plan_binary: tfplan-${{ matrix.environment }}.binary
+          checkov_config: ${{ inputs.checkov_config }}
+          checkov_version: ${{ inputs.checkov_version }}
+
+      - name: Infracost Comment
+        if: ${{ inputs.enable_infracost }}
+        uses: ./actions/infracost-comment
+        with:
+          plan_json_path: ${{ inputs.working_directory }}/${{ steps.checkov.outputs.plan_json }}
+          api_key: ${{ secrets.infracost_api_key }}
+          github_token: ${{ github.token }}
+          pull_request_number: ${{ github.event.pull_request.number }}
+          comment_tag: infracost-${{ matrix.environment }}
+          infracost_version: ${{ inputs.infracost_version }}
+
+      - name: Remove Runner IP
+        if: ${{ always() && inputs.enable_ip_whitelist }}
+        uses: ./actions/storage-network-toggle
+        with:
+          mode: remove
+          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
+          resource_group_name: rg-tfs-platform-${{ matrix.environment }}-uks-01
+          ip_address: ${{ steps.ip_add.outputs.ip_address }}
+          public_access_was_disabled: ${{ steps.ip_add.outputs.public_access_was_disabled }}
+          login: "false"
+
+      - name: Break State Lease
+        if: always()
+        uses: ./actions/break-tfstate-lease
+        with:
+          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
+          container_name: ${{ github.event.repository.name }}
+          state_key: ${{ inputs.state_key }}
+          login: "false"

@@ -1,0 +1,80 @@
+name: "Checkov Plan-Aware Scan"
+description: "Converts a Terraform plan binary to JSON and runs Checkov deep analysis enriched with the source module."
+
+inputs:
+  working_directory:
+    description: "Directory containing the Terraform root module. Used both for terraform show and for plan enrichment."
+    required: false
+    default: infra
+  plan_binary:
+    description: "Path to the Terraform plan binary, relative to working_directory (as passed to terraform -out)."
+    required: true
+  checkov_config:
+    description: "Path to the Checkov config file (relative to the repository root)."
+    required: false
+    default: .github/validation/checkov.yaml
+  checkov_version:
+    description: "Checkov version to install."
+    required: false
+    default: "3.3.2"
+  soft_fail:
+    description: "When true, Checkov findings do not fail the job."
+    required: false
+    default: "false"
+  output_formats:
+    description: "Space-separated Checkov output formats, e.g. 'cli' or 'cli sarif'."
+    required: false
+    default: "cli"
+
+outputs:
+  plan_json:
+    description: "Path to the generated plan JSON, relative to working_directory."
+    value: ${{ steps.show.outputs.plan_json }}
+
+runs:
+  using: composite
+  steps:
+    - name: "Install Checkov"
+      shell: bash
+      env:
+        CHECKOV_VERSION: ${{ inputs.checkov_version }}
+      run: |
+        set -euo pipefail
+        python -m pip install --user "checkov==${CHECKOV_VERSION}"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: "Terraform Show Plan JSON"
+      id: show
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        PLAN_BINARY: ${{ inputs.plan_binary }}
+      run: |
+        set -euo pipefail
+        PLAN_JSON="${PLAN_BINARY}.json"
+        terraform -chdir="${WORKING_DIRECTORY}" show -json "${PLAN_BINARY}" > "${WORKING_DIRECTORY}/${PLAN_JSON}"
+        echo "plan_json=${PLAN_JSON}" >> "$GITHUB_OUTPUT"
+
+    - name: "Checkov Deep Analysis"
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        CHECKOV_CONFIG: ${{ inputs.checkov_config }}
+        PLAN_JSON: ${{ steps.show.outputs.plan_json }}
+        SOFT_FAIL: ${{ inputs.soft_fail }}
+        OUTPUT_FORMATS: ${{ inputs.output_formats }}
+      run: |
+        set -euo pipefail
+        ARGS=(
+          --config-file "${CHECKOV_CONFIG}"
+          --deep-analysis
+          --repo-root-for-plan-enrichment "${WORKING_DIRECTORY}"
+          -f "${WORKING_DIRECTORY}/${PLAN_JSON}"
+        )
+        for fmt in ${OUTPUT_FORMATS}; do
+          ARGS+=(--output "${fmt}")
+        done
+        if [[ "${SOFT_FAIL}" == "true" ]]; then
+          ARGS+=(--soft-fail)
+        fi
+        checkov "${ARGS[@]}"
