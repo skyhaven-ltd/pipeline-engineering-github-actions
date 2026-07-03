@@ -1,9 +1,4 @@
-name: Tag (Reusable)
-
-# Idempotent semver tagging on merge to main. Branch prefix drives the bump:
-#   major/** -> major, minor/** -> minor, patch/** -> patch, anything else -> no tag.
-# The consumer keeps the trigger (pull_request: closed on main); this workflow
-# carries the logic.
+name: Tag
 
 on:
   workflow_call:
@@ -20,8 +15,6 @@ on:
 
 permissions: {}
 
-# Serialise tagging per repo so two quickly-merged PRs cannot race to push the
-# same next tag. Do not cancel in progress - each run must complete.
 concurrency:
   group: tag-${{ github.repository }}
   cancel-in-progress: false

@@ -1,9 +1,5 @@
 name: Release Tag
 
-# This repo tags itself using its own reusable tag workflow, then maintains the
-# floating major tag (e.g. v1) so humans have a moving pointer while SHA pins
-# stay canonical for consumers.
-
 on:
   pull_request:
     branches:
@@ -17,7 +13,7 @@ jobs:
   tag:
     permissions:
       contents: write
-    uses: ./.github/workflows/tag.yml
+    uses: ./.github/workflows/reusable-tag.yml
 
   floating-major:
     name: Update Floating Major Tag

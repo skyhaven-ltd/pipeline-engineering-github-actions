@@ -1,8 +1,4 @@
-# Force LF line endings across the repo. The pre-consolidation cross-repo drift
-# was mostly CRLF/LF noise; normalising here keeps SHA pins and diffs clean.
 * text=auto eol=lf
-
-# Binary assets should never be normalised.
 *.png binary
 *.jpg binary
 *.jpeg binary

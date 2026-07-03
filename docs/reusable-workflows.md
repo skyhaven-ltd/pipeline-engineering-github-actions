@@ -3,7 +3,7 @@
 Pin `@<sha>` to a release commit and keep the `# vX.Y.Z` comment (zizmor enforces
 SHA pinning). Replace `<sha>` below with the real release SHA.
 
-## `tag.yml`
+## `reusable-tag.yml`
 
 Consumer keeps only the trigger:
 
@@ -18,10 +18,10 @@ jobs:
   tag:
     permissions:
       contents: write
-    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/tag.yml@<sha> # v1.0.0
+    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/reusable-tag.yml@<sha> # v1.0.0
 ```
 
-## `megalinter.yml`
+## `reusable-lint.yml`
 
 ```yaml
 name: Lint
@@ -32,7 +32,7 @@ permissions:
   contents: read
 jobs:
   lint:
-    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/megalinter.yml@<sha> # v1.0.0
+    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/reusable-lint.yml@<sha> # v1.0.0
     with:
       flavor: cupcake          # or 'terraform' for infra repos
       # config_file: .mega-linter.yml
@@ -42,9 +42,9 @@ jobs:
 The consumer keeps a small `.mega-linter.yml` holding its `DISABLE` list and
 linter config paths (this replaces the per-repo `VALIDATE_*: false` wall). For
 `infra` repos, disable the IaC linters (Checkov/TFLint/terrascan) — Terraform
-scanning is owned by `terraform-pr-validation.yml`.
+scanning is owned by `reusable-terraform.yml`.
 
-## `terraform-pr-validation.yml`
+## `reusable-terraform.yml`
 
 ```yaml
 name: PR Validation
@@ -58,7 +58,7 @@ permissions:
   contents: read
 jobs:
   validate:
-    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/terraform-pr-validation.yml@<sha> # v1.0.0
+    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/reusable-terraform.yml@<sha> # v1.0.0
     with:
       # working_directory: infra
       environments: '["dev","prd"]'   # prd-only repos pass '["prd"]'
