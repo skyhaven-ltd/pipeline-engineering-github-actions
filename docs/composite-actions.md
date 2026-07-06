@@ -10,7 +10,7 @@ with the real release SHA. All Azure actions default `login: true` and run
 ```yaml
       - uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/ensure-tfstate-container@<sha> # v1.0.0
         with:
-          storage_account_name: sttfsplatformdevuks01
+          storage_account_name: stplatformdevuks02
           # container_name: defaults to the repository name
           login: "false"
 ```
@@ -23,7 +23,7 @@ Callers must keep `if: always()` so a crashed run still releases the lease.
       - if: always()
         uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/break-tfstate-lease@<sha> # v1.0.0
         with:
-          storage_account_name: sttfsplatformdevuks01
+          storage_account_name: stplatformdevuks02
           # state_key: terraform.tfstate  (powertoggle passes per-stack keys)
           login: "false"
 ```
@@ -34,9 +34,26 @@ Callers must keep `if: always()` so a crashed run still releases the lease.
       - uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/terraform-backend-init@<sha> # v1.0.0
         with:
           environment: dev
-          platform_subscription_id: ${{ secrets.AZURE_PLATFORM_SUBSCRIPTION_ID }}
+          platform_subscription_id: ${{ vars.AZURE_PLATFORM_SUBSCRIPTION_ID }}
           # working_directory: infra
           # state_key: terraform.tfstate
+```
+
+## `keyvault-secrets`
+
+Fetches named secrets from a platform Key Vault after Azure login, masks each
+value, and exports them as environment variables for later steps. Multiline
+values (e.g. PEM private keys) are supported. The logged-in principal needs
+`Key Vault Secrets User` on the vault.
+
+```yaml
+      - uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/keyvault-secrets@<sha> # v2.0.0
+        with:
+          keyvault_name: kv-platform-prd-uks-02
+          secrets: |
+            TF_VAR_cloudflare_api_token=cloudflare-api-token
+            TF_VAR_cloudflare_account_id=cloudflare-account-id
+          login: "false"
 ```
 
 ## `checkov-plan-scan`
@@ -60,7 +77,7 @@ belong in separate workflows if a repo wants them.
       - uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/infracost-comment@<sha> # v1.0.0
         with:
           plan_json_path: infra/${{ steps.checkov.outputs.plan_json }}
-          api_key: ${{ secrets.INFRACOST_API_KEY }}
+          api_key: ${{ env.INFRACOST_API_KEY }} # fetched via keyvault-secrets (infracost-api-key)
           github_token: ${{ github.token }}
           pull_request_number: ${{ github.event.pull_request.number }}
           comment_tag: infracost-dev
@@ -76,8 +93,8 @@ add/remove; keep `if: always()` on the remove step.
         uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/storage-network-toggle@<sha> # v1.0.0
         with:
           mode: add
-          storage_account_name: sttfsplatformdevuks01
-          resource_group_name: rg-tfs-platform-dev-uks-01
+          storage_account_name: stplatformdevuks02
+          resource_group_name: rg-platform-dev-uks-01
           login: "false"
 
       # ... terraform steps ...
@@ -86,8 +103,8 @@ add/remove; keep `if: always()` on the remove step.
         uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/storage-network-toggle@<sha> # v1.0.0
         with:
           mode: remove
-          storage_account_name: sttfsplatformdevuks01
-          resource_group_name: rg-tfs-platform-dev-uks-01
+          storage_account_name: stplatformdevuks02
+          resource_group_name: rg-platform-dev-uks-01
           ip_address: ${{ steps.ip_add.outputs.ip_address }}
           public_access_was_disabled: ${{ steps.ip_add.outputs.public_access_was_disabled }}
           login: "false"
