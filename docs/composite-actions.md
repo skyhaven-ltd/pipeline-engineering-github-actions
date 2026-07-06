@@ -52,6 +52,10 @@ Callers must keep `if: always()` so a crashed run still releases the lease.
 
 ## `infracost-comment`
 
+Posts a cost-only sticky PR comment. It intentionally does not run or enforce
+Infracost Cloud governance policies such as tag policies; governance checks
+belong in separate workflows if a repo wants them.
+
 ```yaml
       - uses: skyhaven-ltd/pipeline-engineering-github-actions/actions/infracost-comment@<sha> # v1.0.0
         with:
