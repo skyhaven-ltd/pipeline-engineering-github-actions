@@ -17,11 +17,11 @@ inputs:
     description: "Subscription ID hosting the state storage account."
     required: true
   resource_group_name:
-    description: "Override the derived state resource group name (default rg-tfs-platform-<env>-uks-01)."
+    description: "Override the derived state resource group name (default rg-platform-<env>-uks-01)."
     required: false
     default: ""
   storage_account_name:
-    description: "Override the derived state storage account name (default sttfsplatform<env>uks01)."
+    description: "Override the derived state storage account name (default stplatform<env>uks02)."
     required: false
     default: ""
   container_name:
@@ -49,8 +49,8 @@ runs:
         SA_OVERRIDE: ${{ inputs.storage_account_name }}
       run: |
         set -euo pipefail
-        RG="${RG_OVERRIDE:-rg-tfs-platform-${TF_ENV}-uks-01}"
-        SA="${SA_OVERRIDE:-sttfsplatform${TF_ENV}uks01}"
+        RG="${RG_OVERRIDE:-rg-platform-${TF_ENV}-uks-01}"
+        SA="${SA_OVERRIDE:-stplatform${TF_ENV}uks02}"
         echo "resource_group_name=${RG}" >> "$GITHUB_OUTPUT"
         echo "storage_account_name=${SA}" >> "$GITHUB_OUTPUT"
         echo "Backend: rg=${RG} sa=${SA}"

@@ -83,10 +83,104 @@ runs:
         COMMENT_TAG: ${{ inputs.comment_tag }}
       run: |
         set -euo pipefail
-        infracost comment github \
+
+        # Use `infracost output` and GitHub's API directly instead of
+        # `infracost comment github`. The latter enforces Infracost Cloud
+        # governance policies (for example tag policies) as a side effect of
+        # posting the comment; this workflow is intentionally cost visibility
+        # only and must not fail a PR for governance policy findings.
+        raw_comment_path="/tmp/infracost-${COMMENT_TAG}.md"
+        tagged_comment_path="/tmp/infracost-${COMMENT_TAG}-tagged.md"
+        marker="[//]: <> (${COMMENT_TAG})"
+
+        infracost output \
           --path "/tmp/infracost-${COMMENT_TAG}.json" \
-          --repo "$GITHUB_REPOSITORY" \
-          --pull-request "$PR_NUMBER" \
-          --github-token "$GITHUB_TOKEN" \
-          --behavior "${BEHAVIOR}" \
-          --tag "${COMMENT_TAG}"
+          --format github-comment \
+          --show-skipped \
+          --out-file "${raw_comment_path}"
+
+        {
+          echo "${marker}"
+          echo
+          cat "${raw_comment_path}"
+        } > "${tagged_comment_path}"
+
+        api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+        comments_json="$(mktemp)"
+        body_json="$(mktemp)"
+
+        jq -n --rawfile body "${tagged_comment_path}" '{body: $body}' > "${body_json}"
+
+        curl -fsSL \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "${api_url}?per_page=100" > "${comments_json}"
+
+        matching_ids="$(
+          jq -r --arg marker "${marker}" '.[] | select(.body | contains($marker)) | .id' "${comments_json}"
+        )"
+        latest_id="$(printf '%s\n' "${matching_ids}" | sed '/^$/d' | tail -n 1)"
+
+        post_comment() {
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_url}" \
+            --data @"${body_json}" >/dev/null
+        }
+
+        patch_comment() {
+          local comment_id="$1"
+          curl -fsSL \
+            -X PATCH \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+            --data @"${body_json}" >/dev/null
+        }
+
+        delete_comment() {
+          local comment_id="$1"
+          curl -fsSL \
+            -X DELETE \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" >/dev/null
+        }
+
+        case "${BEHAVIOR}" in
+          update)
+            if [[ -n "${latest_id}" ]]; then
+              patch_comment "${latest_id}"
+            else
+              post_comment
+            fi
+            ;;
+          new)
+            post_comment
+            ;;
+          delete-and-new)
+            while IFS= read -r comment_id; do
+              [[ -z "${comment_id}" ]] && continue
+              delete_comment "${comment_id}"
+            done <<< "${matching_ids}"
+            post_comment
+            ;;
+          hide-and-new)
+            echo "::warning::hide-and-new is not supported by the cost-only GitHub REST poster; using delete-and-new."
+            while IFS= read -r comment_id; do
+              [[ -z "${comment_id}" ]] && continue
+              delete_comment "${comment_id}"
+            done <<< "${matching_ids}"
+            post_comment
+            ;;
+          *)
+            echo "::error::Unsupported Infracost comment behavior: ${BEHAVIOR}" >&2
+            exit 1
+            ;;
+        esac

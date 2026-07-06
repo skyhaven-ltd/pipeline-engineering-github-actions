@@ -56,36 +56,34 @@ on:
         required: false
         default: .github/validation/zizmor.yml
       enable_infracost:
-        description: "Post Infracost cost-diff PR comments (requires infracost_api_key)."
+        description: "Post Infracost cost-diff PR comments (reads infracost-api-key from the platform Key Vault)."
         type: boolean
         required: false
-        default: true
+        default: false
       enable_ip_whitelist:
         description: "Whitelist the runner egress IP on the state storage account firewall for the plan job."
         type: boolean
         required: false
         default: false
-    # Callers must pass `secrets: inherit`. The Azure identifiers live as
-    # per-repo *environment* secrets (dev/prd), which cannot be forwarded via an
-    # explicit `secrets:` mapping — the caller evaluates that mapping outside
-    # any environment scope, so environment secrets resolve to empty strings.
-    # With inherit, the env-scoped plan job resolves them per matrix leg.
-    # Declared optional (never required) so explicit-mapping callers are not
-    # forced to supply values that inherit already provides.
-    secrets:
-      AZURE_CLIENT_ID:
+      keyvault_name:
+        description: "Platform Key Vault holding workflow secrets. Defaults to kv-platform-<env>-uks-02 per matrix environment."
+        type: string
         required: false
-      AZURE_TENANT_ID:
+        default: ""
+      tf_var_secrets:
+        description: >-
+          Multiline mapping of TF_VAR_* environment variable names to Key Vault
+          secret names, one `TF_VAR_name=kv-secret-name` per line. Fetched from
+          the platform Key Vault after Azure login and exported before plan.
+        type: string
         required: false
-      AZURE_SUBSCRIPTION_ID:
-        required: false
-      AZURE_PLATFORM_SUBSCRIPTION_ID:
-        required: false
-      INFRACOST_API_KEY:
-        required: false
-      TF_VARS_JSON:
-        description: "Optional JSON object of plan-time TF_VAR_* values, exported as environment before plan."
-        required: false
+        default: ""
+    # No `secrets:` block. Azure identity comes from the caller's GitHub
+    # environment *variables* (AZURE_CLIENT_ID, AZURE_TENANT_ID,
+    # AZURE_SUBSCRIPTION_ID, AZURE_PLATFORM_SUBSCRIPTION_ID) — the `vars`
+    # context resolves against the caller repo, including environment-level
+    # variables because the plan job is environment-scoped. All sensitive
+    # values are fetched from the platform Key Vault after OIDC login.
 
 permissions:
   contents: read
@@ -198,11 +196,12 @@ jobs:
       matrix:
         environment: ${{ fromJSON(inputs.environments) }}
     env:
-      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_USE_OIDC: "true"
       TF_ENV: ${{ matrix.environment }}
+      KEYVAULT_NAME: ${{ inputs.keyvault_name != '' && inputs.keyvault_name || format('kv-platform-{0}-uks-02', matrix.environment) }}
 
     steps:
       - name: Checkout
@@ -229,9 +228,9 @@ jobs:
       - name: Azure Login
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_PLATFORM_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_PLATFORM_SUBSCRIPTION_ID }}
 
       - name: Whitelist Runner IP
         id: ip_add
@@ -239,25 +238,24 @@ jobs:
         uses: ./pipeline-actions/actions/storage-network-toggle
         with:
           mode: add
-          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
-          resource_group_name: rg-tfs-platform-${{ matrix.environment }}-uks-01
+          storage_account_name: stplatform${{ matrix.environment }}uks02
+          resource_group_name: rg-platform-${{ matrix.environment }}-uks-01
           login: "false"
 
       - name: Ensure State Container
         uses: ./pipeline-actions/actions/ensure-tfstate-container
         with:
-          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
+          storage_account_name: stplatform${{ matrix.environment }}uks02
           container_name: ${{ github.event.repository.name }}
           login: "false"
 
-      - name: Export TF_VAR secrets
-        env:
-          TF_VARS_JSON: ${{ secrets.TF_VARS_JSON }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${TF_VARS_JSON:-}" ]]; then
-            echo "${TF_VARS_JSON}" | jq -r 'to_entries[] | "TF_VAR_\(.key)=\(.value)"' >> "$GITHUB_ENV"
-          fi
+      - name: Export TF_VAR Secrets From Key Vault
+        if: ${{ inputs.tf_var_secrets != '' }}
+        uses: ./pipeline-actions/actions/keyvault-secrets
+        with:
+          keyvault_name: ${{ env.KEYVAULT_NAME }}
+          secrets: ${{ inputs.tf_var_secrets }}
+          login: "false"
 
       - name: Terraform Init
         uses: ./pipeline-actions/actions/terraform-backend-init
@@ -265,7 +263,7 @@ jobs:
           environment: ${{ matrix.environment }}
           working_directory: ${{ inputs.working_directory }}
           state_key: ${{ inputs.state_key }}
-          platform_subscription_id: ${{ secrets.AZURE_PLATFORM_SUBSCRIPTION_ID }}
+          platform_subscription_id: ${{ vars.AZURE_PLATFORM_SUBSCRIPTION_ID }}
           container_name: ${{ github.event.repository.name }}
 
       - name: Terraform Plan
@@ -288,12 +286,20 @@ jobs:
           checkov_config: ${{ inputs.checkov_config }}
           checkov_version: ${{ inputs.checkov_version }}
 
+      - name: Fetch Infracost API Key
+        if: ${{ inputs.enable_infracost }}
+        uses: ./pipeline-actions/actions/keyvault-secrets
+        with:
+          keyvault_name: ${{ env.KEYVAULT_NAME }}
+          secrets: INFRACOST_API_KEY=infracost-api-key
+          login: "false"
+
       - name: Infracost Comment
         if: ${{ inputs.enable_infracost }}
         uses: ./pipeline-actions/actions/infracost-comment
         with:
           plan_json_path: ${{ inputs.working_directory }}/${{ steps.checkov.outputs.plan_json }}
-          api_key: ${{ secrets.INFRACOST_API_KEY }}
+          api_key: ${{ env.INFRACOST_API_KEY }}
           github_token: ${{ github.token }}
           pull_request_number: ${{ github.event.pull_request.number }}
           comment_tag: infracost-${{ matrix.environment }}
@@ -304,8 +310,8 @@ jobs:
         uses: ./pipeline-actions/actions/storage-network-toggle
         with:
           mode: remove
-          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
-          resource_group_name: rg-tfs-platform-${{ matrix.environment }}-uks-01
+          storage_account_name: stplatform${{ matrix.environment }}uks02
+          resource_group_name: rg-platform-${{ matrix.environment }}-uks-01
           ip_address: ${{ steps.ip_add.outputs.ip_address }}
           public_access_was_disabled: ${{ steps.ip_add.outputs.public_access_was_disabled }}
           login: "false"
@@ -314,7 +320,7 @@ jobs:
         if: always()
         uses: ./pipeline-actions/actions/break-tfstate-lease
         with:
-          storage_account_name: sttfsplatform${{ matrix.environment }}uks01
+          storage_account_name: stplatform${{ matrix.environment }}uks02
           container_name: ${{ github.event.repository.name }}
           state_key: ${{ inputs.state_key }}
           login: "false"

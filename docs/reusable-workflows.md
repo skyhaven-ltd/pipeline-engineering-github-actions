@@ -58,36 +58,31 @@ permissions:
   contents: read
 jobs:
   validate:
-    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/reusable-terraform.yml@<sha> # v1.0.0
+    uses: skyhaven-ltd/pipeline-engineering-github-actions/.github/workflows/reusable-terraform.yml@<sha> # v2.0.0
     with:
       # working_directory: infra
       environments: '["dev","prd"]'   # prd-only repos pass '["prd"]'
       # enable_infracost: true
       # enable_ip_whitelist: false     # dormant until state accounts move to default-action Deny
       # terraform_version: "1.14.8"
-    secrets: inherit
+      # keyvault_name: ""              # defaults to kv-platform-<env>-uks-02
+      tf_var_secrets: |
+        TF_VAR_cloudflare_api_token=cloudflare-api-token
+        TF_VAR_cloudflare_account_id=cloudflare-account-id
 ```
 
-`secrets: inherit` is required, not a convenience: the Azure identifiers
-(`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
-`AZURE_PLATFORM_SUBSCRIPTION_ID`) are per-repo **environment** secrets
-(provisioned by `infra-landingzone-platform/scripts/bootstrap-deployment-identities.sh`).
-An explicit `secrets:` mapping is evaluated in the caller outside any
-environment scope, so environment secrets resolve to empty strings and
-`azure/login` fails with "Not all values are present". With inherit, the
-environment-scoped plan job resolves them per matrix leg. zizmor flags
-`secrets-inherit` on the caller — ignore it for the calling workflow in the
-repo's `.github/validation/zizmor.yml`.
+There is no `secrets:` block. The workflow authenticates with the caller's
+GitHub **environment variables** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+`AZURE_SUBSCRIPTION_ID`, `AZURE_PLATFORM_SUBSCRIPTION_ID`), provisioned by
+`infra-landingzone-platform/scripts/bootstrap-platform.sh`. The `vars` context
+resolves against the caller repo, and environment-level variables apply because
+the plan job is environment-scoped per matrix leg.
 
-### Plan-time secret TF_VARs (`tf_vars_json`)
+### Plan-time secret TF_VARs (`tf_var_secrets`)
 
-Repos whose plan needs secret variables (e.g. `stripe_secret_key`) pass them as a
-single JSON object secret. It is exported as `TF_VAR_<key>` before `terraform plan`:
-
-```json
-{ "stripe_secret_key": "sk_live_...", "another_var": "value" }
-```
-
-Scalar string values only — values containing newlines are not supported through
-this channel. Store the JSON as the `TF_VARS_JSON` environment secret; it flows
-to the workflow automatically via `secrets: inherit`.
+Repos whose plan needs secret variables map `TF_VAR_*` names to Key Vault
+secret names, one `TF_VAR_name=kv-secret-name` per line. After Azure login the
+workflow reads each secret from the platform Key Vault
+(`kv-platform-<env>-uks-02`), masks it, and exports it before `terraform plan`.
+The deployment SPNs hold `Key Vault Secrets User` on the platform vaults.
+Multiline values (e.g. PEM keys) are supported.

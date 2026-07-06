@@ -1,0 +1,91 @@
+name: "Key Vault Secrets"
+description: "Fetches named secrets from an Azure Key Vault, masks them, and exports them as environment variables for later steps."
+
+inputs:
+  keyvault_name:
+    description: "Name of the Azure Key Vault to read secrets from."
+    required: true
+  secrets:
+    description: >-
+      Multiline mapping of environment variable name to Key Vault secret name,
+      one `ENV_NAME=kv-secret-name` pair per line. Blank lines and lines
+      starting with # are ignored.
+    required: true
+  login:
+    description: "Run azure/login before fetching secrets. Set to false when the job is already authenticated to Azure."
+    required: false
+    default: "true"
+  azure_client_id:
+    description: "Azure client ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_tenant_id:
+    description: "Azure tenant ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+  azure_subscription_id:
+    description: "Azure subscription ID for OIDC login. Required when login is true."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: "Azure Login"
+      if: ${{ inputs.login == 'true' }}
+      uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+      with:
+        client-id: ${{ inputs.azure_client_id }}
+        tenant-id: ${{ inputs.azure_tenant_id }}
+        subscription-id: ${{ inputs.azure_subscription_id }}
+
+    - name: "Fetch And Export Secrets"
+      shell: bash
+      env:
+        KEYVAULT_NAME: ${{ inputs.keyvault_name }}
+        SECRET_MAP: ${{ inputs.secrets }}
+      run: |
+        set -euo pipefail
+
+        while IFS= read -r line; do
+          # Skip blanks and comments
+          [[ -z "${line// /}" || "${line#"${line%%[![:space:]]*}"}" == \#* ]] && continue
+
+          env_name="${line%%=*}"
+          secret_name="${line#*=}"
+          env_name="$(echo "$env_name" | xargs)"
+          secret_name="$(echo "$secret_name" | xargs)"
+
+          if [[ "$line" != *"="* || -z "$env_name" || -z "$secret_name" ]]; then
+            echo "Malformed mapping line (expected ENV_NAME=kv-secret-name): ${line}" >&2
+            exit 1
+          fi
+
+          if [[ ! "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Invalid environment variable name: ${env_name}" >&2
+            exit 1
+          fi
+
+          echo "Fetching '${secret_name}' from ${KEYVAULT_NAME} as ${env_name}..."
+          if ! value=$(az keyvault secret show \
+            --vault-name "$KEYVAULT_NAME" \
+            --name "$secret_name" \
+            --query value \
+            --output tsv); then
+            echo "Failed to read secret '${secret_name}' from Key Vault '${KEYVAULT_NAME}'." >&2
+            exit 1
+          fi
+
+          # ::add-mask:: only masks a single line, so mask multiline values line by line
+          while IFS= read -r value_line; do
+            [[ -n "$value_line" ]] && echo "::add-mask::${value_line}"
+          done <<< "$value"
+
+          # Random heredoc delimiter keeps multiline values (e.g. PEM keys) intact
+          delimiter="EOF_${RANDOM}${RANDOM}${RANDOM}"
+          {
+            echo "${env_name}<<${delimiter}"
+            printf '%s\n' "$value"
+            echo "${delimiter}"
+          } >> "$GITHUB_ENV"
+        done <<< "$SECRET_MAP"
